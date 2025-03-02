@@ -1,48 +1,67 @@
-from ultralytics import YOLO
+from flask import Flask, request, jsonify, send_file
+from flask_cors import CORS
 import cv2
-import cvzone
-import math
+import numpy as np
+import os
+from ultralytics import YOLO
 
-# cap = cv2.VideoCapture(1)  # For Webcam
-# cap.set(3, 1280)
-# cap.set(4, 720)
-cap = cv2.VideoCapture("Videos/a.webm")  # For Video
+app = Flask(__name__)
+CORS(app)  # Allow requests from frontend
 
+# Load YOLO model
 model = YOLO("best.pt")
 
+# Define object classes
 classNames = ['Barrel', 'Barrels', 'Fuse', 'GUN', 'Gun', 'Missile', 'Missilr', 'TAnk', 'Tank', 'Tanks', 'tank']
-myColor = (0, 0, 255)
-while True:
-    success, img = cap.read()
-    results = model(img, stream=True)
+
+UPLOAD_FOLDER = "uploads"
+OUTPUT_FOLDER = "outputs"
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(OUTPUT_FOLDER, exist_ok=True)
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file provided"}), 400
+    
+    file = request.files['file']
+    filename = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(filename)
+
+    return detect_objects(filename)
+
+def detect_objects(file_path):
+    image = cv2.imread(file_path)
+    results = model(image)
+    detections = []
+
     for r in results:
-        boxes = r.boxes
-        for box in boxes:
-            # Bounding Box
-            x1, y1, x2, y2 = box.xyxy[0]
-            x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-            # cv2.rectangle(img,(x1,y1),(x2,y2),(255,0,255),3)
-            w, h = x2 - x1, y2 - y1
-            # cvzone.cornerRect(img, (x1, y1, w, h))
-
-            # Confidence
-            conf = math.ceil((box.conf[0] * 100)) / 100
-            # Class Name
+        for box in r.boxes:
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            conf = round(float(box.conf[0]), 2)
             cls = int(box.cls[0])
-            currentClass = classNames[cls]
-            print(currentClass)
-            if conf>0.5:
-                if currentClass =='Barrel' or currentClass =='Barrels' or currentClass == "Fuse":
-                    myColor = (0, 0,255)
-                elif currentClass =='GUN' or currentClass =='TAnk' or currentClass == "Mask":
-                    myColor =(0,255,0)
-                else:
-                    myColor = (255, 0, 0)
 
-                cvzone.putTextRect(img, f'{classNames[cls]} {conf}',
-                                   (max(0, x1), max(35, y1)), scale=1, thickness=1,colorB=myColor,
-                                   colorT=(255,255,255),colorR=myColor, offset=5)
-                cv2.rectangle(img, (x1, y1), (x2, y2), myColor, 3)
+            if cls < len(classNames):  # Prevent index errors
+                current_class = classNames[cls]
+                if conf > 0.5:
+                    detections.append({
+                        "class": current_class,
+                        "confidence": conf,
+                        "bbox": [x1, y1, x2, y2]
+                    })
+                    # Draw bounding box on image
+                    cv2.rectangle(image, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                    cv2.putText(image, f"{current_class} {conf*100:.1f}%", (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-    cv2.imshow("Image", img)
-    cv2.waitKey(1)
+    output_path = os.path.join(OUTPUT_FOLDER, os.path.basename(file_path))
+    cv2.imwrite(output_path, image)  # Save output image with detections
+
+    return jsonify({"detections": detections, "image_url": f"http://localhost:5000/output/{os.path.basename(output_path)}"})
+
+@app.route('/output/<filename>')
+def get_output_image(filename):
+    return send_file(os.path.join(OUTPUT_FOLDER, filename), mimetype='image/jpeg')
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000, debug=True)
